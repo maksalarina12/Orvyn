@@ -8,38 +8,59 @@ from backend.core.security import PathValidationError, sanitize_filename, valida
 from backend.core.utils import dumps, new_id, utcnow_iso
 
 
-MAGIC_SIGNATURES: tuple[tuple[bytes, str, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", "png", "image/png"),
-    (b"\xff\xd8\xff", "jpeg", "image/jpeg"),
-    (b"GIF8", "gif", "image/gif"),
-    (b"BM", "bmp", "image/bmp"),
-    (b"RIFF", "webp", "image/webp"),
-    (b"\x00\x00\x00 ftyp", "mp4", "video/mp4"),
-    (b"\x1aE\xdf\xa3", "webm", "video/webm"),
-)
-
-ALLOWED_MIME = {m for _, _, m in MAGIC_SIGNATURES}
+ALLOWED_MIME = {
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/bmp",
+    "image/webp",
+    "video/mp4",
+    "video/webm",
+    "audio/mpeg",
+    "audio/wav",
+    "audio/mp4",
+    "audio/ogg",
+    "audio/flac",
+}
 
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp"}
+AUDIO_TYPES = {"audio/mpeg", "audio/wav", "audio/mp4", "audio/ogg", "audio/flac"}
+
+_M4A_BRANDS = {b"M4A ", b"M4B ", b"M4P "}
 
 
-def sniff_type(data: bytes) -> tuple[str, bool]:
-    header, is_video = "application/octet-stream", False
-    for sig, ftype, mime in MAGIC_SIGNATURES:
-        if not data.startswith(sig):
-            continue
-        if mime == "image/webp":
-            if len(data) >= 12 and data[8:12] == b"WEBP":
-                header, is_video = mime, False
-        elif mime == "video/mp4":
-            if len(data) >= 7 and data[4:8] == b"ftyp":
-                header, is_video = mime, True
-        elif mime == "video/webm":
-            header, is_video = mime, True
-        else:
-            header, is_video = mime, False
-        break
-    return header, is_video
+def sniff_type(data: bytes) -> tuple[str, str]:
+    """Return (mime, file_type) from magic bytes. file_type is image/video/audio."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "image"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "image"
+    if data.startswith(b"GIF8"):
+        return "image/gif", "image"
+    if data.startswith(b"BM"):
+        return "image/bmp", "image"
+    if data.startswith(b"RIFF") and len(data) >= 12:
+        riff = data[8:12]
+        if riff == b"WEBP":
+            return "image/webp", "image"
+        if riff == b"WAVE":
+            return "audio/wav", "audio"
+    if data.startswith(b"ID3"):
+        return "audio/mpeg", "audio"
+    if len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0:
+        return "audio/mpeg", "audio"
+    if data.startswith(b"OggS"):
+        return "audio/ogg", "audio"
+    if data.startswith(b"fLaC"):
+        return "audio/flac", "audio"
+    if len(data) >= 8 and data[4:8] == b"ftyp":
+        brand = data[8:12] if len(data) >= 12 else b""
+        if brand in _M4A_BRANDS:
+            return "audio/mp4", "audio"
+        return "video/mp4", "video"
+    if data.startswith(b"\x1aE\xdf\xa3"):
+        return "video/webm", "video"
+    return "application/octet-stream", ""
 
 
 def row_to_asset(row: sqlite3.Row) -> dict:
@@ -90,9 +111,11 @@ def register_file(
     original_name: str,
     project_id: str | None,
     mime: str,
-    is_video: bool,
+    file_type: str,
     source: str = "upload",
 ) -> dict:
+    if file_type not in {"image", "video", "audio"}:
+        raise ValueError(f"Unsupported file type: {file_type!r}")
     if project_id is not None:
         exists = conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone()
         if not exists:
@@ -106,7 +129,7 @@ def register_file(
     shutil.copyfile(src, dest)
     file_size = dest.stat().st_size
     width = height = None
-    if not is_video:
+    if file_type == "image":
         dims = read_image_dimensions(dest)
         if dims:
             width, height = dims
@@ -119,7 +142,7 @@ def register_file(
             project_id,
             dest_rel,
             safe_name,
-            "video" if is_video else "image",
+            file_type,
             mime,
             width,
             height,

@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,17 +15,10 @@ from backend.jobs.service import request_cancel
 router = APIRouter(prefix="/api", tags=["generation"])
 
 
-class ProviderConfigPayload(BaseModel):
-    space_url: str | None = None
-    api_name: str | None = None
-    input_keys: list[str] | None = None
-    hf_token: str | None = None
-
-
 class EnablePayload(BaseModel):
     enable: bool = True
     confirmed_external: bool = False
-    config: ProviderConfigPayload | None = None
+    config: dict[str, Any] | None = None
 
 
 class GenerationRequest(BaseModel):
@@ -35,6 +29,7 @@ class GenerationRequest(BaseModel):
     params: dict = Field(default_factory=dict)
     project_id: str | None = None
     source_asset_id: str | None = None
+    allow_fallback: bool = True
 
     @field_validator("mode")
     @classmethod
@@ -117,7 +112,7 @@ def provider_enable(provider_id: str, payload: EnablePayload):
             status_code=400,
             detail="Provider eksternal mengirim prompt/data ke pihak ketiga. Kirim confirmed_external=true untuk mengaktifkan secara sadar.",
         )
-    config_update = payload.config.model_dump(exclude_none=True) if payload.config else None
+    config_update = payload.config or None
     try:
         return registry.set_provider_enabled(provider_id, payload.enable, config_update)
     except ValueError as exc:
@@ -179,6 +174,7 @@ def submit_generation(payload: GenerationRequest):
             negative_prompt=payload.negative_prompt,
             params=params,
             project_id=payload.project_id,
+            allow_fallback=payload.allow_fallback,
         )
     return job
 

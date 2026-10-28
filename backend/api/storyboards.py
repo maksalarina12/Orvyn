@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from backend.database.db import db_session
-from backend.media.ffmpeg import ANIMATIC_SIZES, FPS_OPTIONS
+from backend.media.ffmpeg import ANIMATIC_SIZES, FPS_OPTIONS, TRANSITIONS
 from backend.storyboards import service as sb_service
 
 router = APIRouter(prefix="/api/storyboards", tags=["storyboards"])
@@ -13,6 +13,8 @@ class StoryboardCreate(BaseModel):
     project_id: str | None = None
     aspect: str = "16:9"
     fps: int = 24
+    transition: str = "cut"
+    transition_sec: float = Field(default=0.5, ge=0.2, le=2.0)
 
     @field_validator("aspect")
     @classmethod
@@ -34,6 +36,9 @@ class StoryboardUpdate(BaseModel):
     project_id: str | None = None
     aspect: str | None = None
     fps: int | None = None
+    transition: str | None = None
+    transition_sec: float | None = Field(default=None, ge=0.2, le=2.0)
+    audio_asset_id: str | None = None
 
 
 class SceneCreate(BaseModel):
@@ -72,6 +77,8 @@ def create_storyboard(payload: StoryboardCreate):
                 project_id=payload.project_id,
                 aspect=payload.aspect,
                 fps=payload.fps,
+                transition=payload.transition,
+                transition_sec=payload.transition_sec,
             )
         except Exception as exc:
             _map_errors(exc)
@@ -82,6 +89,9 @@ def storyboard_meta():
     return {
         "aspects": [{"label": label, "width": w, "height": h} for label, (w, h) in ANIMATIC_SIZES.items()],
         "fps_options": list(FPS_OPTIONS),
+        "transitions": list(TRANSITIONS),
+        "transition_sec_range": {"min": 0.2, "max": 2.0},
+        "audio_types": ["audio"],
         "limits": {
             "max_scenes": 30,
             "min_scene_sec": 0.5,

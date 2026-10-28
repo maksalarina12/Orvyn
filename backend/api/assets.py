@@ -75,11 +75,14 @@ async def upload_asset(
                 out.write(chunk)
         if size_written == 0:
             raise HTTPException(status_code=400, detail="Empty file")
-        mime, is_video = asset_service.sniff_type(magic[:16])
+        mime, file_type = asset_service.sniff_type(magic[:64])
         if mime not in asset_service.ALLOWED_MIME:
             raise HTTPException(
                 status_code=415,
-                detail="Unsupported file type. Allowed: PNG, JPEG, WEBP, GIF, BMP, MP4, WEBM",
+                detail=(
+                    "Unsupported file type. Allowed: PNG, JPEG, WEBP, GIF, BMP, MP4, WEBM, "
+                    "MP3, WAV, M4A, OGG, FLAC"
+                ),
             )
         if notes and len(notes) > 2000:
             raise HTTPException(status_code=400, detail="notes too long (max 2000 chars)")
@@ -90,7 +93,7 @@ async def upload_asset(
                 original_name=file.filename,
                 project_id=project_id,
                 mime=mime,
-                is_video=is_video,
+                file_type=file_type,
                 source="upload",
             )
     except HTTPException:

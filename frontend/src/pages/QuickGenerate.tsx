@@ -41,6 +41,7 @@ export function QuickGenerate() {
   const [history, setHistory] = useState<string[]>(() => loadPromptHistory());
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [autoPreview, setAutoPreview] = useState(() => loadAutoPreview());
+  const [allowFallback, setAllowFallback] = useState(true);
   const autoPreviewed = useRef<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -149,6 +150,7 @@ export function QuickGenerate() {
         mode,
         prompt: prompt.trim(),
         negative_prompt: negativePrompt.trim() || null,
+        allow_fallback: allowFallback,
         params: isVideoMode
           ? {
               num_frames: params.num_frames,
@@ -440,6 +442,14 @@ export function QuickGenerate() {
             />
             Pratinjau otomatis
           </label>
+          <label className="toggle-inline" title="Kalau provider gagal (kuota/offline), coba provider aktif lain yang mendukung mode ini">
+            <input
+              type="checkbox"
+              checked={allowFallback}
+              onChange={(e) => setAllowFallback(e.target.checked)}
+            />
+            Fallback otomatis
+          </label>
         </div>
       </form>
 
@@ -460,6 +470,9 @@ export function QuickGenerate() {
           <ul className="list">
             <li className="list-row muted small">
               mode: {job.mode} • attempts: {job.attempts}/{job.max_attempts} • provider: {job.provider_id}
+              {job.provider_chain && job.provider_chain.length > 1
+                ? ` • chain: ${job.provider_chain.join(" → ")}`
+                : ""}
             </li>
             {job.error ? <li className="list-row error-banner">{job.error}</li> : null}
           </ul>

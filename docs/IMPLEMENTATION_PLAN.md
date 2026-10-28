@@ -174,3 +174,30 @@ Gotcha yang sudah diketahui:
 - Quick Generate: auto-open popup saat job `completed`, thumbnail hasil + Unduh, deep link `#/quick-generate?preview=<asset_id>`.
 - Popup dipakai ulang di Dashboard filmstrip, Projects & Assets, Campaign Studio, Guided Creation, Remix & Improve, Studio Prompt.
 - Tipografi h1/berkas pratinjau pindah ke Newsreader; build hijau, verifikasi CDP + header download.
+
+### 38. Storyboard: transisi + audio track (28 Okt 2026)
+
+- Schema v7 (migrasi aditif): `storyboards.transition`, `transition_sec`, `audio_asset_id`.
+- FFmpeg: `build_xfade_args` (cut/fade/wipeleft/slideleft/circleopen) dengan offset per scene; segmen diperpanjang `transition_sec` agar total durasi tetap = jumlah durasi scene. `build_mux_audio_args` (AAC 192k, `apad` + `shortest`) untuk audio bed.
+- Upload audio didukung magic-sniff (MP3, WAV, M4A/MP4 audio, OGG, FLAC) → `file_type=audio`; gambar/video ditolak sebagai audio track.
+- Validasi: transisi dikenal, durasi 0,2–2,0 s, tiap scene harus lebih lama dari transisi saat render.
+- FE Storyboard: kontrol transisi + durasi, pilih audio dari aset, upload audio langsung; Projects & Assets + AssetPreview menangani audio.
+- Verifikasi: 92 pytest PASS (termasuk render crossfade + audio nyata dengan ffprobe `has_audio`/`aac`), `npm run build` hijau.
+
+### 39. Google AI Studio: aktivasi + temuan kuota (28 Okt 2026)
+
+- **Bugfix penting**: `POST /api/providers/{id}/enable` memakai model Pydantic lama (`space_url/api_name/input_keys/hf_token`) sehingga kunci `api_key`/`api_token`/`account_id` dari Google, Cloudflare, SiliconFlow, AI Horde **dibuang diam-diam**. Config kini `dict` generik — BYO-key provider benar-benar bisa diaktifkan.
+- Secret provider di `config_redacted` kini diredaksi berdasarkan `capabilities.config_schema[].secret` (sebelumnya hanya `hf_token`).
+- `GOOGLE_API_KEY` dipakai sebagai fallback saat config kosong/`<set>`.
+- Verifikasi live: key valid (models list HTTP 200, 60 model). `gemini_ai_studio` enabled + health ok. Teks `gemini-3.5-flash` → 200. Semua model gambar (`gemini-2.5-flash-image`, `gemini-3.1-flash-image`, `gemini-3-pro-image`, `gemini-nano-banana-2.1`) → **HTTP 429 RESOURCE_EXHAUSTED** ("check your plan and billing details"): kuota gambar free tier tidak tersedia untuk key ini. Job `job_c08456a970b3` gagal jujur setelah 2 attempt.
+- 93 pytest PASS.
+
+### 40. Auto-fallback provider (28 Okt 2026)
+
+- Schema v8 (migrasi aditif `generation_jobs`): `original_provider_id`, `provider_chain_json`, `allow_fallback`.
+- `create_job(allow_fallback=True)` memberi budget 3 attempt (cukup untuk rantai 3 provider); `allow_fallback=False` tetap 2 attempt.
+- Saat attempt gagal (bukan error validasi/konfigurasi): `Engine` memilih provider enabled + health ok + mendukung mode yang sama, mengecualikan provider yang sudah dicoba (`registry.fallback_provider_id`, health probe paralel, prioritas Pollinations → AI Horde → HF Spaces → BYO-key).
+- Params diadaptasi ke constraint provider tujuan (`_adapt_params_for_provider`): clamp `num_images`, isi `width/height` 512 atau ukuran umum bila provider mewajibkan.
+- Error job mencatat provider asal + fallback; `provider_chain` terlihat di UI. `JobValidationError`/`JobConfigurationError` tidak di-retry dan tidak memicu fallback.
+- API `POST /api/generations` menerima `allow_fallback` (default true); Quick Generate punya checkbox "Fallback otomatis".
+- Verifikasi live: `job_2435edb5b974` — Google `gemini-2.5-flash-image` 429 → fallback Pollinations → **completed**, asset `ast_ecb3dd215664` JPEG 512×512 (`backend=pollinations`). 96 pytest PASS; build FE hijau.

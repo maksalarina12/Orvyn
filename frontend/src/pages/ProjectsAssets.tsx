@@ -30,7 +30,7 @@ export function ProjectsAssets() {
   const [name, setName] = useState("");
   const [category, setCategory] = useState("general");
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<"all" | "image" | "video" | "favorite">("all");
+  const [filter, setFilter] = useState<"all" | "image" | "video" | "audio" | "favorite">("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [favorites, setFavorites] = useState<Record<string, boolean>>({});
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -83,6 +83,7 @@ export function ProjectsAssets() {
     const items = assets.data?.items ?? [];
     if (filter === "image") return items.filter((a) => a.file_type === "image");
     if (filter === "video") return items.filter((a) => a.file_type === "video");
+    if (filter === "audio") return items.filter((a) => a.file_type === "audio");
     if (filter === "favorite") return items.filter((a) => favorites[a.id] ?? a.is_favorite);
     return items;
   }, [assets.data, filter, favorites]);
@@ -229,6 +230,7 @@ export function ProjectsAssets() {
                 ["all", "Semua"],
                 ["image", "Gambar"],
                 ["video", "Video"],
+                ["audio", "Audio"],
                 ["favorite", "Favorit"],
               ] as const
             ).map(([value, label]) => (
@@ -297,7 +299,9 @@ export function ProjectsAssets() {
                   {asset.file_type === "image" ? (
                     <img src={assetFileUrl(asset.id)} alt={asset.filename} loading="lazy" />
                   ) : (
-                    <span className="film-video">▶ VIDEO</span>
+                    <span className="film-video">
+                      {asset.file_type === "audio" ? "♪ AUDIO" : "▶ VIDEO"}
+                    </span>
                   )}
                   <span className="asset-open-hint">Pratinjau</span>
                 </button>

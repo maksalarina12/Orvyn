@@ -111,3 +111,14 @@ def test_gateway_accepts_text_to_video_mode(client_with_test_provider):
     # mode text_to_video valid di gateway; provider test menerima param apa pun
     assert res.status_code == 200
     assert res.json()["mode"] == "text_to_video"
+
+
+def test_enable_payload_accepts_generic_provider_config():
+    from backend.api.generations import EnablePayload
+
+    payload = EnablePayload(
+        enable=True,
+        confirmed_external=True,
+        config={"api_key": "test-key", "model": "gemini-2.5-flash-image"},
+    )
+    assert payload.config == {"api_key": "test-key", "model": "gemini-2.5-flash-image"}

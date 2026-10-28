@@ -115,6 +115,19 @@ def get_provider(provider_id: str) -> GenerationProvider | None:
     return REGISTRY.get(provider_id)
 
 
+def _redact_config(provider: GenerationProvider, config: dict | None) -> dict:
+    secrets = {
+        field.get("key")
+        for field in (provider.capabilities().get("config_schema") or [])
+        if field.get("secret")
+    }
+    secrets.add("hf_token")
+    return {
+        key: ("<set>" if key in secrets and value else value)
+        for key, value in (config or {}).items()
+    }
+
+
 def describe_provider_status(provider_id: str, force_health: bool = False) -> dict:
     provider = get_provider(provider_id)
     if not provider:
@@ -127,7 +140,7 @@ def describe_provider_status(provider_id: str, force_health: bool = False) -> di
         "enabled": is_provider_enabled(provider_id),
         "configured": True,
         "capabilities": provider.capabilities(),
-        "config_redacted": {k: ("<set>" if k == "hf_token" else v) for k, v in (config_data or {}).items()},
+        "config_redacted": _redact_config(provider, config_data),
     }
     if status["enabled"]:
         status["health"] = _fresh_health(provider, force=force_health)
@@ -144,6 +157,55 @@ def list_provider_status(force_health: bool = False) -> list[dict]:
         else:
             futures = [pool.submit(describe_provider_status, pid) for pid in provider_ids]
         return [f.result() for f in futures]
+
+
+_FALLBACK_PRIORITY: tuple[str, ...] = (
+    "pollinations",
+    "ai_horde",
+    "hf_space",
+    "hf_space_kontext",
+    "hf_space_video",
+    "hf_space_video_ltx",
+    "siliconflow",
+    "cloudflare",
+    "google_ai_studio",
+)
+
+
+def fallback_provider_id(mode: str, exclude: set[str] | None = None) -> str | None:
+    """Pick an enabled, healthy provider that supports this mode.
+
+    Only providers the user explicitly enabled are eligible; health is checked
+    in parallel so a failing provider is not chosen blindly.
+    """
+    ensure_registered()
+    excluded = set(exclude or ())
+    order = list(REGISTRY)
+
+    def rank(provider_id: str) -> tuple[int, int]:
+        try:
+            return (_FALLBACK_PRIORITY.index(provider_id), order.index(provider_id))
+        except ValueError:
+            return (len(_FALLBACK_PRIORITY), order.index(provider_id))
+
+    candidates: list[GenerationProvider] = []
+    for provider_id in sorted(order, key=rank):
+        if provider_id in excluded:
+            continue
+        provider = REGISTRY[provider_id]
+        if mode not in (provider.capabilities().get("modes") or []):
+            continue
+        if not is_provider_enabled(provider_id):
+            continue
+        candidates.append(provider)
+    if not candidates:
+        return None
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates))) as pool:
+        healths = list(pool.map(_fresh_health, candidates))
+    for provider, health in zip(candidates, healths):
+        if health.get("ok"):
+            return provider.provider_id
+    return None
 
 
 # Built-in providers ----------------------------------------------------------

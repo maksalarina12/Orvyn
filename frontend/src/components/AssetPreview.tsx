@@ -66,6 +66,7 @@ export function AssetPreview({
 
   const index = Math.max(0, allIds.indexOf(current));
   const isVideo = (asset?.file_type ?? (job?.mode === "text_to_video" ? "video" : "image")) === "video";
+  const isAudio = asset?.file_type === "audio";
   const prompt = job?.prompt ?? asset?.prompt ?? "";
   const title = asset?.filename ?? `hasil-${current.slice(-8)}`;
   const hasMultiple = allIds.length > 1;
@@ -98,7 +99,7 @@ export function AssetPreview({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement | null)?.tagName ?? "";
-      if (["INPUT", "TEXTAREA", "SELECT", "VIDEO"].includes(tag)) return;
+      if (["INPUT", "TEXTAREA", "SELECT", "VIDEO", "AUDIO"].includes(tag)) return;
       if (e.key === "Escape") {
         e.preventDefault();
         onClose();
@@ -193,7 +194,9 @@ export function AssetPreview({
         </div>
 
         <div className="preview-stage">
-          {isVideo ? (
+          {isAudio ? (
+            <audio key={current} src={assetFileUrl(current)} controls autoPlay loop />
+          ) : isVideo ? (
             <video key={current} src={assetFileUrl(current)} controls autoPlay loop playsInline />
           ) : (
             <img src={assetFileUrl(current)} alt={title} />

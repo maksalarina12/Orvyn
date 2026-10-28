@@ -5,7 +5,7 @@ from pathlib import Path
 
 from backend.core import config
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
     max_attempts INTEGER NOT NULL DEFAULT 2,
     error TEXT,
     result_asset_ids TEXT,
+    original_provider_id TEXT,
+    provider_chain_json TEXT NOT NULL DEFAULT '[]',
+    allow_fallback INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT
@@ -116,6 +119,9 @@ CREATE TABLE IF NOT EXISTS storyboards (
     title TEXT NOT NULL DEFAULT '',
     aspect TEXT NOT NULL DEFAULT '16:9',
     fps INTEGER NOT NULL DEFAULT 24,
+    transition TEXT NOT NULL DEFAULT 'cut',
+    transition_sec REAL NOT NULL DEFAULT 0.5,
+    audio_asset_id TEXT,
     status TEXT NOT NULL DEFAULT 'draft',
     output_asset_id TEXT,
     created_at TEXT NOT NULL,
@@ -213,10 +219,44 @@ def init_db(db_path: Path | None = None) -> None:
     config.ensure_data_dirs()
     with db_session(db_path) as conn:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+
+
+_STORYBOARD_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("transition", "TEXT NOT NULL DEFAULT 'cut'"),
+    ("transition_sec", "REAL NOT NULL DEFAULT 0.5"),
+    ("audio_asset_id", "TEXT"),
+)
+
+_JOB_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("original_provider_id", "TEXT"),
+    ("provider_chain_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("allow_fallback", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+
+def _add_missing_columns(conn: sqlite3.Connection, table: str, migrations) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, ddl in migrations:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for databases created before v8."""
+    _add_missing_columns(conn, "storyboards", _STORYBOARD_MIGRATIONS)
+    _add_missing_columns(conn, "generation_jobs", _JOB_MIGRATIONS)
+    conn.execute(
+        "UPDATE generation_jobs SET original_provider_id = provider_id WHERE original_provider_id IS NULL"
+    )
+    conn.execute(
+        "UPDATE generation_jobs SET provider_chain_json = '["' || provider_id || '"]'"
+        " WHERE provider_chain_json = '[]'"
+    )
 
 
 _CONNECTIONS_READONLY = "SELECT name FROM sqlite_master WHERE type='table'"

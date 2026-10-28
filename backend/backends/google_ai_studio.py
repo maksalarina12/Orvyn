@@ -33,7 +33,7 @@ class GoogleAIStudioProvider(GenerationProvider):
         import os
 
         key = str(cfg.get("api_key", "")).strip()
-        if key == "<set>":
+        if not key or key == "<set>":
             key = os.environ.get("GOOGLE_API_KEY", "")
         model = str(cfg.get("model", DEFAULT_MODEL)).strip() or DEFAULT_MODEL
         return key, model

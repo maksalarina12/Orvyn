@@ -157,7 +157,7 @@ def test_failing_provider_marks_failed_with_error(client, engine):
 
     registry.register_provider(BoomProvider())
     _enable("boom_provider", {"anything": "goes"})
-    submit = _submit(client, {"provider_id": "boom_provider"})
+    submit = _submit(client, {"provider_id": "boom_provider", "allow_fallback": False})
     assert submit.status_code == 200
     job_id = submit.json()["id"]
     finished = engine.run_pending()
@@ -168,3 +168,84 @@ def test_failing_provider_marks_failed_with_error(client, engine):
     assert finished["status"] == "failed"
     assert "boom" in finished["error"]
     assert finished["attempts"] == 2
+
+
+class QuotaBoomProvider(TestPNGProvider):
+    provider_id = "quota_boom_provider"
+    display_name = "Quota Boom Provider (test suite only)"
+
+    def generate(self, *args, **kwargs):
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+
+def test_fallback_switches_to_enabled_provider(client, engine):
+    registry.register_provider(QuotaBoomProvider())
+    _enable("quota_boom_provider", {"anything": "goes"})
+    _enable("test_provider")
+
+    submit = _submit(client, {"provider_id": "quota_boom_provider"})
+    assert submit.status_code == 200, submit.text
+    job = submit.json()
+    assert job["provider_chain"] == ["quota_boom_provider"]
+    assert job["allow_fallback"] is True
+    assert job["max_attempts"] == 3
+
+    first = engine.run_pending()
+    assert first["id"] == job["id"]
+    assert first["status"] == "queued"
+    assert first["provider_id"] == "test_provider"
+    assert first["provider_chain"] == ["quota_boom_provider", "test_provider"]
+    assert "fallback otomatis" in first["error"]
+
+    finished = engine.run_pending()
+    assert finished["status"] == "completed", finished
+    assert finished["provider_id"] == "test_provider"
+    assert finished["attempts"] == 2
+    assert len(finished["result_asset_ids"]) == 2
+    asset = client.get(f"/api/assets/{finished['result_asset_ids'][0]}").json()
+    assert asset["backend"] == "test_provider"
+
+
+def test_fallback_can_be_disabled_per_job(client, engine):
+    registry.register_provider(QuotaBoomProvider())
+    _enable("quota_boom_provider", {"anything": "goes"})
+    _enable("test_provider")
+
+    submit = _submit(client, {"provider_id": "quota_boom_provider", "allow_fallback": False})
+    assert submit.status_code == 200, submit.text
+    job_id = submit.json()["id"]
+
+    first = engine.run_pending()
+    assert first["id"] == job_id
+    assert first["status"] == "queued"
+    assert first["provider_id"] == "quota_boom_provider"
+
+    finished = engine.run_pending()
+    assert finished["status"] == "failed"
+    assert finished["attempts"] == 2
+    assert finished["provider_chain"] == ["quota_boom_provider"]
+
+
+def test_fallback_params_adapt_to_provider_constraints():
+    from backend.jobs.service import _adapt_params_for_provider
+
+    class StrictProvider:
+        def capabilities(self):
+            return {"limits": {"max_images_per_job": 2}}
+
+        def validate_params(self, params):
+            errors = []
+            for key in ("width", "height"):
+                value = params.get(key)
+                if not isinstance(value, int) or not 256 <= value <= 1024:
+                    errors.append(key)
+            if not isinstance(params.get("num_images", 1), int) or params.get("num_images", 1) > 2:
+                errors.append("num_images")
+            return errors
+
+    adapted = _adapt_params_for_provider(StrictProvider(), "text_to_image", {"num_images": 4})
+    assert adapted == {"num_images": 2, "width": 512, "height": 512}
+    assert _adapt_params_for_provider(StrictProvider(), "text_to_image", {"width": 999}) == {
+        "width": 512,
+        "height": 512,
+    }

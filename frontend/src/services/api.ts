@@ -22,8 +22,9 @@ import type {
 const BASE = "/api";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const isForm = init?.body instanceof FormData;
   const response = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: isForm ? undefined : { "Content-Type": "application/json" },
     ...init,
   });
   if (!response.ok) {
@@ -51,10 +52,16 @@ export const api = {
   deleteProject: (id: string) =>
     request<{ deleted: string }>(`/projects/${id}?confirm=true`, { method: "DELETE" }),
   asset: (id: string) => request<Asset>(`/assets/${id}`),
-  assets: (params: { limit?: number; project_id?: string } = {}) => {
+  assets: (params: { limit?: number; project_id?: string; file_type?: string } = {}) => {
     const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "") as [string, string][];
     const qs = new URLSearchParams(Object.fromEntries(entries)).toString();
     return request<{ items: Asset[] }>(`/assets${qs ? `?${qs}` : ""}`);
+  },
+  uploadAsset: (file: File, projectId?: string) => {
+    const form = new FormData();
+    form.append("file", file);
+    if (projectId) form.append("project_id", projectId);
+    return request<Asset>("/assets/upload", { method: "POST", body: form });
   },
   providers: () => request<{ items: ProviderStatus[] }>("/providers"),
   enableProvider: (id: string, payload: { enable: boolean; confirmed_external?: boolean; config?: Record<string, unknown> }) =>
@@ -67,6 +74,7 @@ export const api = {
     params?: Record<string, unknown>;
     project_id?: string | null;
     source_asset_id?: string | null;
+    allow_fallback?: boolean;
   }) => request<GenerationJob>("/generations", { method: "POST", body: JSON.stringify(payload) }),
   job: (id: string) => request<GenerationJob>(`/generations/${id}`),
   jobs: (params: { limit?: number } = {}) =>
@@ -104,10 +112,26 @@ export const api = {
     return request<{ items: Storyboard[] }>(`/storyboards${qs ? `?${qs}` : ""}`);
   },
   storyboard: (id: string) => request<Storyboard>(`/storyboards/${id}`),
-  createStoryboard: (payload: { title: string; project_id?: string | null; aspect?: string; fps?: number }) =>
-    request<Storyboard>("/storyboards", { method: "POST", body: JSON.stringify(payload) }),
-  updateStoryboard: (id: string, payload: { title?: string; aspect?: string; fps?: number; project_id?: string | null }) =>
-    request<Storyboard>(`/storyboards/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createStoryboard: (payload: {
+    title: string;
+    project_id?: string | null;
+    aspect?: string;
+    fps?: number;
+    transition?: string;
+    transition_sec?: number;
+  }) => request<Storyboard>("/storyboards", { method: "POST", body: JSON.stringify(payload) }),
+  updateStoryboard: (
+    id: string,
+    payload: {
+      title?: string;
+      aspect?: string;
+      fps?: number;
+      project_id?: string | null;
+      transition?: string;
+      transition_sec?: number;
+      audio_asset_id?: string | null;
+    }
+  ) => request<Storyboard>(`/storyboards/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteStoryboard: (id: string) =>
     request<{ deleted: string }>(`/storyboards/${id}`, { method: "DELETE" }),
   addScene: (storyboardId: string, payload: { asset_id: string; duration_sec?: number; note?: string }) =>

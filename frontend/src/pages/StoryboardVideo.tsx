@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, assetFileUrl } from "../services/api";
 import { useApiState } from "../hooks/useApi";
 import { EmptyState, StatusPill } from "../components/ui";
@@ -15,6 +15,11 @@ export function StoryboardVideo() {
   const [aspect, setAspect] = useState("16:9");
   const [fps, setFps] = useState(24);
   const [projectId, setProjectId] = useState("");
+  const [transition, setTransition] = useState("cut");
+  const [transitionSec, setTransitionSec] = useState(0.5);
+  const [audioAssetId, setAudioAssetId] = useState("");
+  const [audioKey, setAudioKey] = useState(0);
+  const [uploadingAudio, setUploadingAudio] = useState(false);
   const [sceneAsset, setSceneAsset] = useState("");
   const [sceneDuration, setSceneDuration] = useState(2);
   const [sceneNote, setSceneNote] = useState("");
@@ -28,6 +33,50 @@ export function StoryboardVideo() {
     [open?.id, open?.project_id]
   );
   const imageAssets = (projectAssets.data?.items ?? []).filter((a) => a.file_type === "image");
+  const audioAssets = useApiState<{ items: Asset[] }>(
+    () => api.assets({ file_type: "audio", limit: 100 }),
+    [audioKey]
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setTransition(open.transition ?? "cut");
+    setTransitionSec(open.transition_sec ?? 0.5);
+    setAudioAssetId(open.audio_asset_id ?? "");
+  }, [open?.id, open?.transition, open?.transition_sec, open?.audio_asset_id]);
+
+  const patchBoard = async (payload: {
+    title?: string;
+    aspect?: string;
+    fps?: number;
+    project_id?: string | null;
+    transition?: string;
+    transition_sec?: number;
+    audio_asset_id?: string | null;
+  }) => {
+    if (!open) return;
+    try {
+      setOpen(await api.updateStoryboard(open.id, payload));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Gagal menyimpan pengaturan storyboard");
+    }
+  };
+
+  const uploadAudio = async (file: File) => {
+    if (!open) return;
+    setUploadingAudio(true);
+    setError(null);
+    try {
+      const asset = await api.uploadAsset(file, open.project_id ?? undefined);
+      setAudioKey((k) => k + 1);
+      setAudioAssetId(asset.id);
+      setOpen(await api.updateStoryboard(open.id, { audio_asset_id: asset.id }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Gagal mengunggah audio");
+    } finally {
+      setUploadingAudio(false);
+    }
+  };
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -115,6 +164,8 @@ export function StoryboardVideo() {
 
   const aspects = meta.data?.aspects ?? [{ label: "16:9", width: 640, height: 360 }];
   const fpsOptions = meta.data?.fps_options ?? [12, 24, 30];
+  const transitions = meta.data?.transitions ?? ["cut", "fade", "wipeleft", "slideleft", "circleopen"];
+  const transitionRange = meta.data?.transition_sec_range ?? { min: 0.2, max: 2 };
   const limits = meta.data?.limits ?? { max_scenes: 30, min_scene_sec: 0.5, max_scene_sec: 10 };
 
   return (
@@ -187,7 +238,10 @@ export function StoryboardVideo() {
         <section className="panel">
           <div className="panel-head">
             <h2>
-              {open.title} <span className="muted small">({open.aspect} • {open.fps} fps)</span>
+              {open.title}{" "}
+              <span className="muted small">
+                ({open.aspect} • {open.fps} fps • {open.transition === "cut" ? "cut" : `${open.transition} ${Number(open.transition_sec).toFixed(1)}s`})
+              </span>
             </h2>
             <div className="plan-item-status">
               <StatusPill tone="neutral">
@@ -237,6 +291,70 @@ export function StoryboardVideo() {
           ) : (
             <EmptyState title="Belum ada scene" detail="Tambahkan keyframe gambar dari project ini sebagai scene." />
           )}
+
+          <div className="gc-approve" style={{ marginTop: 14 }}>
+            <label>
+              Transisi
+              <select
+                value={transition}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setTransition(value);
+                  void patchBoard({ transition: value });
+                }}
+              >
+                {transitions.map((name) => (
+                  <option key={name} value={name}>
+                    {name === "cut" ? "Potongan langsung (cut)" : name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Durasi transisi ({transitionRange.min}–{transitionRange.max}s)
+              <input
+                type="number"
+                min={transitionRange.min}
+                max={transitionRange.max}
+                step="0.1"
+                value={transitionSec}
+                disabled={transition === "cut"}
+                onChange={(e) => setTransitionSec(Number(e.target.value))}
+                onBlur={() => void patchBoard({ transition_sec: transitionSec })}
+              />
+            </label>
+            <label>
+              Audio track
+              <select
+                value={audioAssetId}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setAudioAssetId(value);
+                  void patchBoard({ audio_asset_id: value || null });
+                }}
+              >
+                <option value="">— tanpa audio —</option>
+                {(audioAssets.data?.items ?? []).map((asset) => (
+                  <option key={asset.id} value={asset.id}>
+                    {asset.filename}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Upload audio
+              <input
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.ogg,.flac"
+                disabled={uploadingAudio}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) void uploadAudio(file);
+                  e.currentTarget.value = "";
+                }}
+              />
+            </label>
+          </div>
 
           <div className="gc-approve">
             <label>

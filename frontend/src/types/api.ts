@@ -39,7 +39,7 @@ export interface Asset {
   project_id: string | null;
   path: string;
   filename: string;
-  file_type: "image" | "video";
+  file_type: "image" | "video" | "audio";
   mime_type: string;
   width: number | null;
   height: number | null;
@@ -89,6 +89,9 @@ export interface GenerationJob {
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
   attempts: number;
   max_attempts: number;
+  original_provider_id: string | null;
+  provider_chain: string[];
+  allow_fallback: boolean;
   error: string | null;
   result_asset_ids: string[];
   created_at: string;
@@ -176,12 +179,24 @@ export interface StoryboardScene {
   asset: StoryboardSceneAsset | null;
 }
 
+export interface StoryboardAudioAsset {
+  id: string;
+  filename: string;
+  path: string;
+  mime_type: string;
+  file_size: number;
+}
+
 export interface Storyboard {
   id: string;
   project_id: string | null;
   title: string;
   aspect: string;
   fps: number;
+  transition: string;
+  transition_sec: number;
+  audio_asset_id: string | null;
+  audio_asset?: StoryboardAudioAsset | null;
   status: "draft" | "rendered";
   output_asset_id: string | null;
   scenes?: StoryboardScene[];
@@ -194,6 +209,9 @@ export interface Storyboard {
 export interface StoryboardMeta {
   aspects: { label: string; width: number; height: number }[];
   fps_options: number[];
+  transitions: string[];
+  transition_sec_range: { min: number; max: number };
+  audio_types: string[];
   limits: { max_scenes: number; min_scene_sec: number; max_scene_sec: number };
 }
 

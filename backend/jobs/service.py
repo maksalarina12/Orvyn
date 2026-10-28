@@ -12,10 +12,21 @@ from backend.core.utils import dumps, loads, new_id, utcnow_iso
 from backend.database.db import db_session
 
 
+class JobValidationError(RuntimeError):
+    """Invalid request parameters — retrying or switching provider will not help."""
+
+
+class JobConfigurationError(RuntimeError):
+    """Missing/unknown provider — retrying or switching provider will not help."""
+
+
 def row_to_job(row) -> dict:
     data = dict(row)
     data["params"] = loads(data.pop("params_json")) or {}
     data["result_asset_ids"] = loads(data.pop("result_asset_ids")) or []
+    chain = loads(data.pop("provider_chain_json", None)) or []
+    data["provider_chain"] = chain or [data["provider_id"]]
+    data["allow_fallback"] = bool(data.get("allow_fallback", 1))
     return data
 
 
@@ -28,12 +39,31 @@ def create_job(
     params: dict,
     max_attempts: int = 2,
     project_id: str | None = None,
+    allow_fallback: bool = True,
 ) -> dict:
+    if allow_fallback:
+        max_attempts = max(max_attempts, 3)
     job_id = new_id("job")
     conn.execute(
         "INSERT INTO generation_jobs (id, project_id, provider_id, mode, prompt, negative_prompt, params_json,"
-        " status, attempts, max_attempts, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (job_id, project_id, provider_id, mode, prompt, negative_prompt, dumps(params), "queued", 0, max_attempts, utcnow_iso()),
+        " status, attempts, max_attempts, original_provider_id, provider_chain_json, allow_fallback, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            job_id,
+            project_id,
+            provider_id,
+            mode,
+            prompt,
+            negative_prompt,
+            dumps(params),
+            "queued",
+            0,
+            max_attempts,
+            provider_id,
+            dumps([provider_id]),
+            int(allow_fallback),
+            utcnow_iso(),
+        ),
     )
     return row_to_job(conn.execute("SELECT * FROM generation_jobs WHERE id = ?", (job_id,)).fetchone())
 
@@ -172,30 +202,82 @@ class Engine:
         except JobCancelledError as exc:
             with db_session() as conn:
                 _set_job_status(conn, job["id"], "cancelled", error=str(exc), finished_at=utcnow_iso())
+        except (JobValidationError, JobConfigurationError) as exc:
+            with db_session() as conn:
+                current = get_job(conn, job["id"])
+                if not current or current["status"] != "running":
+                    return None
+                _set_job_status(
+                    conn,
+                    job["id"],
+                    "failed",
+                    error=f"Attempt {current['attempts']} failed (tidak di-retry): {exc}",
+                    finished_at=utcnow_iso(),
+                )
         except Exception as exc:
             with db_session() as conn:
                 current = get_job(conn, job["id"])
                 if not current or current["status"] != "running":
                     return None
-                upcoming_attempt = current["attempts"] + 1
-                retryable = current["max_attempts"]
-                if current["attempts"] < retryable:
+                can_retry = current["attempts"] < current["max_attempts"]
+            fallback = self._pick_fallback(current) if can_retry and current.get("allow_fallback") else None
+            with db_session() as conn:
+                current = get_job(conn, job["id"])
+                if not current or current["status"] != "running":
+                    return None
+                attempts = current["attempts"]
+                if not can_retry:
+                    _set_job_status(
+                        conn,
+                        job["id"],
+                        "failed",
+                        error=f"Attempt {attempts} failed: {exc}",
+                        finished_at=utcnow_iso(),
+                    )
+                elif fallback:
+                    fallback_id, fallback_params = fallback
+                    chain = list(current.get("provider_chain") or [current["provider_id"]])
+                    if fallback_id not in chain:
+                        chain.append(fallback_id)
                     _set_job_status(
                         conn,
                         job["id"],
                         "queued",
-                        error=f"Attempt {current['attempts']} failed: {exc}",
+                        provider_id=fallback_id,
+                        provider_chain_json=dumps(chain),
+                        params_json=dumps(fallback_params),
+                        error=(
+                            f"Attempt {attempts} via {current['provider_id']} gagal: {exc}"
+                            f" — fallback otomatis ke {fallback_id}."
+                        ),
                     )
                 else:
                     _set_job_status(
                         conn,
                         job["id"],
-                        "failed",
-                        error=f"Attempt {current['attempts']} failed: {exc}",
-                        finished_at=utcnow_iso(),
+                        "queued",
+                        error=f"Attempt {attempts} failed: {exc}",
                     )
         with db_session() as conn:
             return get_job(conn, job["id"])
+
+    def _pick_fallback(self, job: dict) -> tuple[str, dict] | None:
+        from backend.backends import registry
+
+        exclude = set(job.get("provider_chain") or []) | {job["provider_id"]}
+        try:
+            provider_id = registry.fallback_provider_id(job["mode"], exclude)
+        except Exception:
+            return None
+        if not provider_id:
+            return None
+        provider = registry.get_provider(provider_id)
+        if not provider:
+            return None
+        adapted = _adapt_params_for_provider(provider, job["mode"], job["params"])
+        if adapted is None:
+            return None
+        return provider_id, adapted
 
     def _is_cancelled(self, job_id: str) -> bool:
         with db_session() as conn:
@@ -207,10 +289,10 @@ class Engine:
 
         provider = registry.get_provider(job["provider_id"])
         if not provider:
-            raise RuntimeError(f"Provider {job['provider_id']} tidak terdaftar")
+            raise JobConfigurationError(f"Provider {job['provider_id']} tidak terdaftar")
         validation = provider.validate_params(job["params"])
         if validation:
-            raise RuntimeError("Parameter tidak valid: " + "; ".join(validation))
+            raise JobValidationError("Parameter tidak valid: " + "; ".join(validation))
 
         out_dir = make_job_output_dir(self._project_slug(job["project_id"]), job["id"])
         outputs = provider.generate(
@@ -266,6 +348,29 @@ def get_engine() -> Engine:
     if _GLOBAL_ENGINE is None:
         _GLOBAL_ENGINE = Engine()
     return _GLOBAL_ENGINE
+
+
+def _adapt_params_for_provider(provider, mode: str, params: dict) -> dict | None:
+    """Return params valid for the fallback provider, or None if impossible.
+
+    Providers have different constraints (e.g. Google accepts omitted width,
+    Pollinations/AI Horde require 256-1024). We try the original params first,
+    then a clamped num_images, then common square/landscape sizes.
+    """
+    base = dict(params)
+    limits = (provider.capabilities().get("limits") or {})
+    max_images = limits.get("max_images_per_job")
+    if isinstance(base.get("num_images"), int) and isinstance(max_images, int):
+        base["num_images"] = max(1, min(base["num_images"], max_images))
+
+    candidates = [dict(params), base]
+    if mode in ("text_to_image", "image_to_image"):
+        for width, height in ((512, 512), (640, 384), (384, 640), (512, 384), (384, 512)):
+            candidates.append({**base, "width": width, "height": height})
+    for candidate in candidates:
+        if not provider.validate_params(candidate):
+            return candidate
+    return None
 
 
 def _read_dims(path: Path):

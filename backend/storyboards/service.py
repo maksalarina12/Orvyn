@@ -40,19 +40,33 @@ def create_storyboard(
     project_id: str | None,
     aspect: str = "16:9",
     fps: int = 24,
+    transition: str = "cut",
+    transition_sec: float = 0.5,
 ) -> dict:
     if aspect not in ffmpeg.ANIMATIC_SIZES:
         raise StoryboardError(f"aspect harus salah satu dari {sorted(ffmpeg.ANIMATIC_SIZES)}")
     if fps not in ffmpeg.FPS_OPTIONS:
         raise StoryboardError(f"fps harus salah satu dari {ffmpeg.FPS_OPTIONS}")
+    _validate_transition(transition, transition_sec)
     if project_id and not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
         raise StoryboardError(f"Project not found: {project_id}")
     now = utcnow_iso()
     sb_id = new_id("sb")
     conn.execute(
-        "INSERT INTO storyboards (id, project_id, title, aspect, fps, status, created_at, updated_at)"
-        " VALUES (?,?,?,?,?,?,?,?)",
-        (sb_id, project_id, title or "Untitled storyboard", aspect, fps, STATUS_DRAFT, now, now),
+        "INSERT INTO storyboards (id, project_id, title, aspect, fps, transition, transition_sec, status, created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            sb_id,
+            project_id,
+            title or "Untitled storyboard",
+            aspect,
+            fps,
+            transition,
+            float(transition_sec),
+            STATUS_DRAFT,
+            now,
+            now,
+        ),
     )
     return get_storyboard(conn, sb_id)  # type: ignore[return-value]
 
@@ -69,8 +83,31 @@ def get_storyboard(conn: sqlite3.Connection, storyboard_id: str) -> dict | None:
             (storyboard_id,),
         ).fetchall()
     ]
-    storyboard["duration_total"] = sum(scene["duration_sec"] for scene in storyboard["scenes"])
+    storyboard["duration_total"] = _effective_duration(
+        storyboard["scenes"],
+        storyboard.get("transition", "cut"),
+        storyboard.get("transition_sec", 0.0),
+    )
+    storyboard["audio_asset"] = _audio_asset(conn, storyboard.get("audio_asset_id"))
     return storyboard
+
+
+def _effective_duration(scenes: list[dict], transition: str, transition_sec: float) -> float:
+    total = sum(float(scene["duration_sec"]) for scene in scenes)
+    if transition != "cut" and len(scenes) > 1:
+        total -= (len(scenes) - 1) * float(transition_sec)
+    return round(max(total, 0.0), 3)
+
+
+def _audio_asset(conn: sqlite3.Connection, audio_asset_id: str | None) -> dict | None:
+    if not audio_asset_id:
+        return None
+    asset = asset_service.get_asset(conn, audio_asset_id)
+    if not asset:
+        return None
+    return {
+        key: asset[key] for key in ("id", "filename", "path", "mime_type", "file_size")
+    }
 
 
 def _decorate_scene(conn: sqlite3.Connection, scene: dict) -> dict:
@@ -93,13 +130,16 @@ def list_storyboards(conn: sqlite3.Connection, project_id: str | None = None, li
     params.append(min(limit, 200))
     items = [_row_to_storyboard(row) for row in conn.execute(sql, params).fetchall()]
     for item in items:
-        count = conn.execute(
-            "SELECT COUNT(*) AS total, COALESCE(SUM(duration_sec), 0) AS seconds"
-            " FROM storyboard_scenes WHERE storyboard_id = ?",
+        scenes = conn.execute(
+            "SELECT duration_sec FROM storyboard_scenes WHERE storyboard_id = ? ORDER BY idx ASC",
             (item["id"],),
-        ).fetchone()
-        item["scene_count"] = count["total"] if count else 0
-        item["duration_total"] = count["seconds"] if count else 0
+        ).fetchall()
+        item["scene_count"] = len(scenes)
+        item["duration_total"] = _effective_duration(
+            [dict(scene) for scene in scenes],
+            item.get("transition", "cut"),
+            item.get("transition_sec", 0.0),
+        )
     return items
 
 
@@ -124,6 +164,22 @@ def update_storyboard(conn: sqlite3.Connection, storyboard_id: str, changes: dic
             raise StoryboardError(f"fps harus salah satu dari {ffmpeg.FPS_OPTIONS}")
         fields.append("fps = ?")
         params.append(changes["fps"])
+    if "transition" in changes and changes["transition"] is not None:
+        transition = changes["transition"]
+        transition_sec = changes.get("transition_sec", storyboard.get("transition_sec", 0.5))
+        _validate_transition(transition, transition_sec)
+        fields.append("transition = ?")
+        params.append(transition)
+    if "transition_sec" in changes and changes["transition_sec"] is not None:
+        transition = changes.get("transition", storyboard.get("transition", "cut"))
+        _validate_transition(transition, changes["transition_sec"])
+        fields.append("transition_sec = ?")
+        params.append(float(changes["transition_sec"]))
+    if "audio_asset_id" in changes:
+        audio_asset_id = changes["audio_asset_id"] or None
+        _validate_audio_asset(conn, audio_asset_id)
+        fields.append("audio_asset_id = ?")
+        params.append(audio_asset_id)
     if "project_id" in changes:
         project_id = changes["project_id"] or None
         if project_id and not conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone():
@@ -248,12 +304,24 @@ def render_storyboard(conn: sqlite3.Connection, storyboard_id: str) -> dict:
         image_paths.append(resolved)
         durations.append(float(scene["duration_sec"]))
 
+    audio_path = _resolve_audio_path(conn, storyboard.get("audio_asset_id"))
+
     size = ffmpeg.ANIMATIC_SIZES[storyboard["aspect"]]
     out_dir = config.OUTPUTS_DIR / _project_slug(conn, storyboard["project_id"]) / storyboard_id
     out_path = out_dir / f"{storyboard_id}_animatic.mp4"
     work_dir = config.CACHE_DIR / "renders" / storyboard_id
     try:
-        meta = ffmpeg.render_animatic(image_paths, durations, out_path, work_dir, size=size, fps=storyboard["fps"])
+        meta = ffmpeg.render_animatic(
+            image_paths,
+            durations,
+            out_path,
+            work_dir,
+            size=size,
+            fps=storyboard["fps"],
+            transition=storyboard.get("transition", "cut"),
+            transition_sec=float(storyboard.get("transition_sec", 0.5)),
+            audio_path=audio_path,
+        )
     except ffmpeg.FFmpegError as exc:
         raise StoryboardError(str(exc)) from exc
 
@@ -294,6 +362,46 @@ def _project_slug(conn: sqlite3.Connection, project_id: str | None) -> str:
         if row:
             return str(row["name"]).lower().replace(" ", "-")[:40] or project_id
     return "unassigned"
+
+
+def _validate_transition(transition: str, transition_sec: float) -> None:
+    if transition not in ffmpeg.TRANSITIONS:
+        raise StoryboardError(f"transisi harus salah satu dari {sorted(ffmpeg.TRANSITIONS)}")
+    try:
+        value = float(transition_sec)
+    except (TypeError, ValueError) as exc:
+        raise StoryboardError(f"durasi transisi tidak valid: {transition_sec!r}") from exc
+    if not ffmpeg.MIN_TRANSITION_SEC <= value <= ffmpeg.MAX_TRANSITION_SEC:
+        raise StoryboardError(
+            f"durasi transisi harus {ffmpeg.MIN_TRANSITION_SEC}–{ffmpeg.MAX_TRANSITION_SEC} detik"
+        )
+
+
+def _validate_audio_asset(conn: sqlite3.Connection, audio_asset_id: str | None) -> None:
+    if not audio_asset_id:
+        return
+    asset = asset_service.get_asset(conn, audio_asset_id)
+    if not asset:
+        raise StoryboardError(f"Asset not found: {audio_asset_id}")
+    if asset["file_type"] != "audio":
+        raise StoryboardError("Audio track harus asset audio, bukan gambar/video")
+
+
+def _resolve_audio_path(conn: sqlite3.Connection, audio_asset_id: str | None) -> Path | None:
+    if not audio_asset_id:
+        return None
+    asset = asset_service.get_asset(conn, audio_asset_id)
+    if not asset:
+        raise StoryboardError(f"Asset audio tidak ditemukan: {audio_asset_id}")
+    if asset["file_type"] != "audio":
+        raise StoryboardError("Audio track harus asset audio, bukan gambar/video")
+    try:
+        resolved = validate_relative_path(asset["path"])
+    except PathValidationError as exc:
+        raise StoryboardError(f"Path audio tidak valid: {exc}") from exc
+    if not resolved.exists():
+        raise StoryboardError(f"File audio tidak ada: {resolved}")
+    return resolved
 
 
 def _validate_duration(duration_sec) -> None:

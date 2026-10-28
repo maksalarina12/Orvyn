@@ -147,3 +147,78 @@ def test_render_video_asset_as_keyframe_rejected(client, storyboard):
     )
     assert response.status_code == 400
     assert "gambar" in response.json()["detail"]
+
+
+def _wav_bytes(seconds: float = 1.0, rate: int = 8000) -> bytes:
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\x00\x00" * int(rate * seconds))
+    return buf.getvalue()
+
+
+def test_audio_upload_and_crossfade_render(client, storyboard):
+    sb_id = storyboard["id"]
+    audio = client.post(
+        "/api/assets/upload",
+        files={"file": ("bed.wav", _wav_bytes(2.0), "audio/wav")},
+    )
+    assert audio.status_code == 200, audio.text
+    audio_body = audio.json()
+    assert audio_body["file_type"] == "audio"
+    assert audio_body["mime_type"] == "audio/wav"
+
+    image_a = _upload(client, "fade-a.png", _png_bytes(color=(210, 40, 40)))
+    image_b = _upload(client, "fade-b.png", _png_bytes(color=(40, 40, 210)))
+    client.post(f"/api/storyboards/{sb_id}/scenes", json={"asset_id": image_a["id"], "duration_sec": 1.0})
+    client.post(f"/api/storyboards/{sb_id}/scenes", json={"asset_id": image_b["id"], "duration_sec": 1.0})
+
+    patched = client.patch(
+        f"/api/storyboards/{sb_id}",
+        json={"transition": "fade", "transition_sec": 0.3, "audio_asset_id": audio_body["id"]},
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["transition"] == "fade"
+    assert body["transition_sec"] == 0.3
+    assert body["audio_asset"]["filename"] == "bed.wav"
+    assert abs(body["duration_total"] - 1.7) < 0.001
+
+    rendered = client.post(f"/api/storyboards/{sb_id}/render")
+    assert rendered.status_code == 200, rendered.text
+    asset = client.get(f"/api/assets/{rendered.json()['output_asset_id']}").json()
+    meta = ffmpeg.probe(validate_relative_path(asset["path"]))
+    assert meta["has_audio"] is True
+    assert meta["audio_codec"] == "aac"
+    assert meta["codec"] == "h264"
+    assert abs((meta["duration"] or 0) - 1.7) < 0.5
+
+
+def test_audio_track_must_be_audio_asset(client, storyboard):
+    sb_id = storyboard["id"]
+    image = _upload(client, "not-audio.png", _png_bytes())
+    response = client.patch(f"/api/storyboards/{sb_id}", json={"audio_asset_id": image["id"]})
+    assert response.status_code == 400
+    assert "audio" in response.json()["detail"].lower()
+
+
+def test_invalid_transition_rejected(client, storyboard):
+    response = client.patch(f"/api/storyboards/{storyboard['id']}", json={"transition": "warp"})
+    assert response.status_code == 400
+    assert "transisi" in response.json()["detail"].lower()
+
+
+def test_transition_longer_than_scene_rejected(client, storyboard):
+    sb_id = storyboard["id"]
+    image = _upload(client, "short.png", _png_bytes())
+    client.post(f"/api/storyboards/{sb_id}/scenes", json={"asset_id": image["id"], "duration_sec": 0.5})
+    client.post(f"/api/storyboards/{sb_id}/scenes", json={"asset_id": image["id"], "duration_sec": 0.5})
+    patched = client.patch(f"/api/storyboards/{sb_id}", json={"transition": "fade", "transition_sec": 1.0})
+    assert patched.status_code == 200, patched.text
+    rendered = client.post(f"/api/storyboards/{sb_id}/render")
+    assert rendered.status_code == 400
+    assert "transisi" in rendered.json()["detail"].lower()
