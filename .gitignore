@@ -1,0 +1,37 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Orvyn generated data
+data/projects/*
+data/assets/*
+data/outputs/*
+data/workflows/*
+data/cache/*
+data/orvyn.db*
+!data/projects/.gitkeep
+!data/assets/.gitkeep
+!data/outputs/.gitkeep
+!data/workflows/.gitkeep
+!data/cache/.gitkeep
+
+# Models and weights
+models/
+*.safetensors
+*.ckpt
+*.onnx
+*.gguf
+
+# Env, secrets, caches
+.env
+*.log
+.DS_Store
